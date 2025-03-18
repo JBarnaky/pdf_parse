@@ -1,0 +1,4 @@
+pymupdf
+pyzbar
+pillow
+python-dateutil
