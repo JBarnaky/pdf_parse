@@ -13,7 +13,8 @@ import logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
+    datefmt='%Y-%m-%d %H:%M:%S',
+    force=True
 )
 
 def open_pdf(pdf_path):
@@ -69,9 +70,14 @@ def batch_process(executor, func, items, batch_size=10):
 def read_pdf_to_dict(pdf_path, num_threads):
     doc = open_pdf(pdf_path)
     with ThreadPoolExecutor(max_workers=num_threads) as executor:
-        pages_text = list(batch_process(executor, get_page_text, doc))
-    all_text = "\n".join(pages_text)
-    return parse_data_text(all_text)
+        pages_text = batch_process(executor, get_page_text, doc)
+        page_generator = (
+            (f"Page_{page_num}", parse_data_text(text))
+            for page_num, text in enumerate(pages_text, 1)
+        )
+        page_dict = dict(page_generator)
+
+    return page_dict
 
 def validate_date(date_str):
     try:
@@ -122,7 +128,6 @@ def validate_structure(template_data, test_data):
         if not validator(value):
             logging.error(f"Ошибка в поле {field}: {message}")
             return False
-
     return True
 
 def process_page_for_barcodes(page, dpi):
@@ -130,7 +135,7 @@ def process_page_for_barcodes(page, dpi):
         pix = page.get_pixmap(dpi=dpi)
         img = preprocess_image(pix)
         decoded_objects = decode(img)
-        return [obj.data.decode('utf-8') for obj in decoded_objects]
+        return [obj.data.decode('utf-8', errors='ignore') for obj in decoded_objects]
     except Exception as e:
         logging.error(f"Ошибка при обработке страницы {page.number + 1}: {e}")
         return []
@@ -155,21 +160,22 @@ def main():
     args = parser.parse_args()
 
     try:
-        template_data = read_pdf_to_dict(args.template_pdf, args.threads)
-        logging.info("Шаблон: %s", template_data)
-        test_data = read_pdf_to_dict(args.test_pdf, args.threads)
-        logging.info("Тестовые данные: %s", test_data)
+        template_doc = read_pdf_to_dict(args.template_pdf, args.threads)
+        logging.info("Шаблон: %s", template_doc)
+        test_doc = read_pdf_to_dict(args.test_pdf, args.threads)
+        logging.info("Тестовые данные: %s", test_doc)
 
-        if not validate_structure(template_data, test_data):
-            logging.error("Структура PDF не соответствует шаблону.")
-        else:
-            logging.info("Структура соответствует шаблону")
-
+        for page_num in template_doc:
+            template_page = template_doc.get(page_num, {})
+            test_page = test_doc.get(page_num, {})
+            if not validate_structure(template_page, test_page):
+                logging.error(f"Структура страницы {page_num} не соответствует шаблону")
+            else:
+                logging.info(f"Структура страницы {page_num} корректна")
         barcodes = extract_barcodes(args.test_pdf, args.threads, args.dpi)
         logging.info("Найденные баркоды: %s", barcodes)
-
     except Exception as e:
-        logging.error(f"Произошла ошибка: {e}")
+        logging.error(f"Ошибка: {e}", exc_info=True)
 
 if __name__ == "__main__":
     main()
