@@ -1,6 +1,6 @@
 import fitz  # PyMuPDF - pip install pymupdf
 import argparse
-from pyzbar.pyzbar import decode
+from pyzbar.pyzbar import decode    # !apt install libzbar0
 from PIL import Image
 from concurrent.futures import ThreadPoolExecutor
 import os
