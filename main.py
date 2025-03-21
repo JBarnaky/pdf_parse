@@ -1,4 +1,4 @@
-import fitz  # PyMuPDF - pip install pymupdf
+import fitz # PyMuPDF - pip install pymupdf
 import argparse
 from pyzbar.pyzbar import decode    # !apt install libzbar0
 from PIL import Image
@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 import os
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
-from itertools import chain
+import itertools
 
 import logging
 
@@ -19,12 +19,27 @@ logging.basicConfig(
 
 def open_pdf(pdf_path):
     try:
-        return fitz.open(pdf_path)
+        doc = fitz.open(pdf_path)
+        if doc.is_encrypted:
+            if not doc.authenticate(""):
+                logging.error(f"Файл {pdf_path} защищен паролем.")
+                raise ValueError("Файл защищен паролем.")
+        return doc
+
     except FileNotFoundError:
         logging.error(f"Файл {pdf_path} не найден.")
-        raise FileNotFoundError(f"Файл {pdf_path} не найден.")
+        raise
+
+    except fitz.PdfPasswordError:
+        logging.error(f"Файл {pdf_path} защищен паролем.")
+        raise ValueError("Файл защищен паролем.")
+
+    except fitz.FileDataError:
+        logging.error(f"Файл {pdf_path} поврежден или не является PDF.")
+        raise ValueError("Файл поврежден или не является PDF.")
+
     except Exception as e:
-        logging.error(f"Ошибка при открытии файла {pdf_path}: {e}")
+        logging.error(f"Неизвестная ошибка при открытии файла {pdf_path}: {str(e)}")
         raise
 
 def get_page_text(page):
@@ -47,6 +62,12 @@ def parse_data_text(text):
     return data_dict
 
 def preprocess_image(pix):
+    if not hasattr(pix, "width") or not hasattr(pix, "height"):
+        raise AttributeError("Объект pix должен содержать атрибуты width и height")
+
+    if pix.width <= 0 or pix.height <= 0:
+        raise ValueError(f"Некорректные размеры изображения: {pix.width}x{pix.height}")
+
     if pix.n < 4:
         mode = "RGB" if pix.colorspace else "L"
         return Image.frombytes(
@@ -62,9 +83,10 @@ def preprocess_image(pix):
         ).convert("RGB")
 
 def batch_process(executor, func, items, batch_size=10):
-    return chain.from_iterable(
-        executor.map(func, items[i:i + batch_size])
-        for i in range(0, len(items), batch_size)
+    items_iter = iter(items)
+    batches = iter(lambda: list(itertools.islice(items_iter, batch_size)), [])
+    return itertools.chain.from_iterable(
+        executor.map(func, batch) for batch in batches
     )
 
 def read_pdf_to_dict(pdf_path, num_threads):
@@ -80,11 +102,19 @@ def read_pdf_to_dict(pdf_path, num_threads):
     return page_dict
 
 def validate_date(date_str):
-    try:
-        date = datetime.strptime(date_str, "%d.%m.%Y")
-        return date <= datetime.now() + relativedelta(years=10)
-    except ValueError:
-        return False
+    formats = [
+        "%d.%m.%Y",
+        "%d/%m/%Y",
+        "%d-%m-%Y",
+        "%d %m %Y"
+    ]
+    for fmt in formats:
+        try:
+            date = datetime.strptime(date_str, fmt)
+            return date <= datetime.now() + relativedelta(years=10)
+        except ValueError:
+            continue
+    return False
 
 def validate_structure(template_data, test_data):
     missing_keys = set(template_data.keys()) - set(test_data.keys())
@@ -131,13 +161,16 @@ def validate_structure(template_data, test_data):
     return True
 
 def process_page_for_barcodes(page, dpi):
+    if dpi <= 150 or dpi >= 600:
+        logging.error(f"Ошибка: Значение DPI {dpi} для страницы {page.number + 1} вне допустимого диапазона (150-600).")
+        return []
     try:
         pix = page.get_pixmap(dpi=dpi)
         img = preprocess_image(pix)
         decoded_objects = decode(img)
         return [obj.data.decode('utf-8', errors='ignore') for obj in decoded_objects]
     except Exception as e:
-        logging.error(f"Ошибка при обработке страницы {page.number + 1}: {e}")
+        logging.error(f"Ошибка при обработке страницы {page.number + 1}: {e}", exc_info=True)
         return []
 
 def extract_barcodes(pdf_path, num_threads, dpi):
@@ -148,7 +181,10 @@ def extract_barcodes(pdf_path, num_threads, dpi):
             lambda page: process_page_for_barcodes(page, dpi),
             doc
         )
-        return [barcode for page_barcodes_list in page_barcodes for barcode in page_barcodes_list]
+        return {
+            f"Page_{page_num}": barcodes
+            for page_num, barcodes in enumerate(page_barcodes, start=1)
+        }
 
 def main():
     parser = argparse.ArgumentParser(description="Обработка PDF-файлов и проверка их по шаблону.")
@@ -173,7 +209,7 @@ def main():
             else:
                 logging.info(f"Структура страницы {page_num} корректна")
         barcodes = extract_barcodes(args.test_pdf, args.threads, args.dpi)
-        logging.info("Найденные баркоды: %s", barcodes)
+        logging.info("Найденные баркоды по страницам: %s", barcodes)
     except Exception as e:
         logging.error(f"Ошибка: {e}", exc_info=True)
 
