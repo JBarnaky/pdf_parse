@@ -169,7 +169,7 @@ def process_page_for_barcodes(params):
     try:
         doc = open_pdf(pdf_path)
         page = doc.load_page(page_num)
-        if dpi <= 150 or dpi >= 600:
+        if dpi < 150 or dpi > 600:
             logging.error(f"Ошибка: Значение DPI {dpi} для страницы {page_num + 1} вне допустимого диапазона (150-600).")
             return []
         pix = page.get_pixmap(dpi=dpi)
