@@ -1,14 +1,14 @@
-import fitz # PyMuPDF - pip install pymupdf
 import argparse
-from pyzbar.pyzbar import decode    # !apt install libzbar0
-from PIL import Image
-from concurrent.futures import ThreadPoolExecutor
-import os
-from datetime import datetime
-from dateutil.relativedelta import relativedelta
 import itertools
-
 import logging
+import os
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+
+import fitz  # PyMuPDF - pip install pymupdf
+from PIL import Image
+from dateutil.relativedelta import relativedelta
+from pyzbar.pyzbar import decode  # !apt install libzbar0
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,15 +29,9 @@ def open_pdf(pdf_path):
     except FileNotFoundError:
         logging.error(f"Файл {pdf_path} не найден.")
         raise
-
-    except fitz.PdfPasswordError:
-        logging.error(f"Файл {pdf_path} защищен паролем.")
-        raise ValueError("Файл защищен паролем.")
-
     except fitz.FileDataError:
         logging.error(f"Файл {pdf_path} поврежден или не является PDF.")
         raise ValueError("Файл поврежден или не является PDF.")
-
     except Exception as e:
         logging.error(f"Неизвестная ошибка при открытии файла {pdf_path}: {str(e)}")
         raise
@@ -161,7 +155,7 @@ def validate_structure(template_data, test_data):
     return True
 
 def process_page_for_barcodes(page, dpi):
-    if dpi <= 150 or dpi >= 600:
+    if dpi < 150 or dpi > 600:
         logging.error(f"Ошибка: Значение DPI {dpi} для страницы {page.number + 1} вне допустимого диапазона (150-600).")
         return []
     try:
