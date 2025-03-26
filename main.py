@@ -9,6 +9,8 @@ import fitz  # PyMuPDF - pip install pymupdf
 from PIL import Image
 from dateutil.relativedelta import relativedelta
 from pyzbar.pyzbar import decode  # !apt install libzbar0
+# from memory_profiler import profile
+# import cProfile
 
 logging.basicConfig(
     level=logging.INFO,
@@ -56,25 +58,19 @@ def parse_data_text(text):
     return data_dict
 
 def preprocess_image(pix):
-    if not hasattr(pix, "width") or not hasattr(pix, "height"):
+    if not (hasattr(pix, "width") and hasattr(pix, "height")):
         raise AttributeError("Объект pix должен содержать атрибуты width и height")
 
     if pix.width <= 0 or pix.height <= 0:
         raise ValueError(f"Некорректные размеры изображения: {pix.width}x{pix.height}")
 
-    if pix.n < 4:
-        mode = "RGB" if pix.colorspace else "L"
-        return Image.frombytes(
-            mode,
-            (pix.width, pix.height),
-            pix.samples
-        )
-    else:
-        return Image.frombytes(
-            "RGBA",
-            (pix.width, pix.height),
-            pix.samples
-        ).convert("RGB")
+    mode = "RGBA" if pix.n >= 4 else ("RGB" if pix.colorspace else "L")
+    image = Image.frombytes(mode, (pix.width, pix.height), pix.samples)
+
+    if pix.n >= 4:
+        image = image.convert("RGB")
+
+    return image
 
 def batch_process(executor, func, items, batch_size=10):
     items_iter = iter(items)
@@ -83,25 +79,24 @@ def batch_process(executor, func, items, batch_size=10):
         executor.map(func, batch) for batch in batches
     )
 
-def read_pdf_to_dict(pdf_path, num_threads):
+def read_pdf_to_dict(pdf_path, num_threads, batch_size):
     doc = open_pdf(pdf_path)
     with ThreadPoolExecutor(max_workers=num_threads) as executor:
-        pages_text = batch_process(executor, get_page_text, doc)
+        pages_text = batch_process(executor, get_page_text, doc, batch_size=batch_size)
         page_generator = (
             (f"Page_{page_num}", parse_data_text(text))
             for page_num, text in enumerate(pages_text, 1)
         )
         page_dict = dict(page_generator)
-
     return page_dict
 
 def validate_date(date_str):
-    formats = [
+    formats = (
         "%d.%m.%Y",
         "%d/%m/%Y",
         "%d-%m-%Y",
         "%d %m %Y"
-    ]
+    )
     for fmt in formats:
         try:
             date = datetime.strptime(date_str, fmt)
@@ -111,45 +106,96 @@ def validate_date(date_str):
     return False
 
 def validate_structure(template_data, test_data):
-    missing_keys = set(template_data.keys()) - set(test_data.keys())
-    if missing_keys:
-        logging.error(f"Отсутствующие ключи: {missing_keys}")
+    template_keys = set(template_data.keys())
+    test_keys = set(test_data.keys())
+    if template_keys != test_keys:
+        missing = template_keys - test_keys
+        extra = test_keys - template_keys
+        if missing:
+            logging.error(f"Отсутствующие ключи: {missing}")
+        if extra:
+            logging.error(f"Лишние ключи: {extra}")
         return False
-    extra_keys = set(test_data.keys()) - set(template_data.keys())
-    if extra_keys:
-        logging.error(f"Лишние ключи: {extra_keys}")
-        return False
 
-    def is_valid_number(value):
-        return value.isdigit()
+    field_validations = {
+        "PN": {
+            "validator": lambda v: not v.strip().isdigit(),
+            "message": "PN должен быть текстом (не только цифры)"
+        },
+        "SN": {
+            "validator": lambda v: v.isdigit() and len(v) >= 6,
+            "message": "SN должен содержать 6 или более цифр"
+        },
+        "DESCRIPTION": {
+            "validator": lambda v: v.strip() != "",
+            "message": "DESCRIPTION не может быть пустым"
+        },
+        "LOCATION": {
+            "validator": lambda v: v.isdigit(),
+            "message": "LOCATION должен содержать только цифры"
+        },
+        "CONDITION": {
+            "validator": lambda v: len(v.strip()) >= 2,
+            "message": "CONDITION должен содержать 2+ символа"
+        },
+        "RECEIVER#": {
+            "validator": lambda v: v.isdigit(),
+            "message": "RECEIVER# должен содержать только цифры"
+        },
+        "UOM": {
+            "validator": lambda v: len(v.strip()) >= 2,
+            "message": "UOM должен содержать 2+ символа"
+        },
+        "EXP DATE": {
+            "validator": validate_date,
+            "message": "Неправильный формат даты или дата превышает 10 лет"
+        },
+        "PO": {
+            "validator": lambda v: len(v.strip()) >= 4,
+            "message": "PO должен содержать 4+ символа"
+        },
+        "CERT SOURCE": {
+            "validator": lambda v: v.strip() != "",
+            "message": "CERT SOURCE не может быть пустым"
+        },
+        "REC.DATE": {
+            "validator": validate_date,
+            "message": "Неправильный формат даты или дата превышает 10 лет"
+        },
+        "MFG": {
+            "validator": lambda v: v.strip() != "",
+            "message": "MFG не может быть пустым"
+        },
+        "BATCH#": {
+            "validator": lambda v: v.isdigit(),
+            "message": "BATCH должен содержать только цифры"
+        },
+        "DOM": {
+            "validator": validate_date,
+            "message": "Неправильный формат даты или дата превышает 10 лет"
+        },
+        "LOT#": {
+            "validator": lambda v: v.isdigit(),
+            "message": "LOT# должен содержать только цифры"
+        },
+        "Qty": {
+            "validator": lambda v: v.isdigit(),
+            "message": "Qty должен содержать только цифры"
+        },
+        "NOTES": {
+            "validator": lambda v: v.strip() != "",
+            "message": "NOTES не может быть пустым"
+        }
+    }
 
-    def is_valid_text(value, min_length=None):
-        stripped = value.strip()
-        return bool(stripped) and (not min_length or len(stripped) >= min_length)
-
-    checks = [
-        ("PN", lambda v: not is_valid_number(v.strip()), "PN должен быть текстом (не только цифры)"),
-        ("SN", lambda v: is_valid_number(v) and len(v) >= 6, "SN должен содержать 6 или более цифр"),
-        ("DESCRIPTION", lambda v: is_valid_text(v), "DESCRIPTION не может быть пустым"),
-        ("LOCATION", lambda v: is_valid_number(v), "LOCATION должен содержать только цифры"),
-        ("CONDITION", lambda v: is_valid_text(v, 2), "CONDITION должен содержать 2+ символа"),
-        ("RECEIVER#", lambda v: is_valid_number(v), "RECEIVER# должен содержать только цифры"),
-        ("UOM", lambda v: is_valid_text(v, 2), "UOM должен содержать 2+ символа"),
-        ("EXP DATE", lambda v: validate_date(v), "Неправильный формат даты или дата превышает 10 лет"),
-        ("PO", lambda v: is_valid_text(v, 4), "PO должен содержать 4+ символа"),
-        ("CERT SOURCE", lambda v: is_valid_text(v), "CERT SOURCE не может быть пустым"),
-        ("REC.DATE", lambda v: validate_date(v), "Неправильный формат даты или дата превышает 10 лет"),
-        ("MFG", lambda v: is_valid_text(v), "MFG не может быть пустым"),
-        ("BATCH#", lambda v: is_valid_number(v), "BATCH должен содержать только цифры"),
-        ("DOM", lambda v: validate_date(v), "Неправильный формат даты или дата превышает 10 лет"),
-        ("LOT#", lambda v: is_valid_number(v), "LOT# должен содержать только цифры"),
-        ("Qty", lambda v: is_valid_number(v), "Qty должен содержать только цифры"),
-        ("NOTES", lambda v: is_valid_text(v), "NOTES не может быть пустым"),
-    ]
-
-    for field, validator, message in checks:
+    for field in template_data.keys():
         value = test_data.get(field, "")
-        if not validator(value):
+        validation = field_validations.get(field)
+        if not validation:
+            continue
+        validator_func = validation['validator']
+        message = validation['message']
+        if not validator_func(value):
             logging.error(f"Ошибка в поле {field}: {message}")
             return False
     return True
@@ -167,34 +213,33 @@ def process_page_for_barcodes(page, dpi):
         logging.error(f"Ошибка при обработке страницы {page.number + 1}: {e}", exc_info=True)
         return []
 
-def extract_barcodes(pdf_path, num_threads, dpi):
+def extract_barcodes(pdf_path, num_threads, dpi, batch_size):
     doc = open_pdf(pdf_path)
     with ThreadPoolExecutor(max_workers=num_threads) as executor:
         page_barcodes = batch_process(
             executor,
             lambda page: process_page_for_barcodes(page, dpi),
-            doc
+            doc,
+            batch_size=batch_size
         )
         return {
             f"Page_{page_num}": barcodes
             for page_num, barcodes in enumerate(page_barcodes, start=1)
         }
-
+# @profile
 def main():
     parser = argparse.ArgumentParser(description="Обработка PDF-файлов и проверка их по шаблону.")
     parser.add_argument("template_pdf", nargs='?', default="test_task.pdf", help="Путь к PDF-файлу с шаблоном.")
     parser.add_argument("test_pdf", nargs='?', default="test_task.pdf", help="Путь к PDF-файлу для проверки.")
-    parser.add_argument("-threads", type=int, default=min(8, os.cpu_count() or 2),
-                        help="Максимальное количество потоков.")
+    parser.add_argument("--threads", type=int, default=min(8, os.cpu_count() or 2), help="Максимальное количество потоков.")
+    parser.add_argument("--batch-size", type=int, default=10, help="Размер пакета для обработки.")
     parser.add_argument("--dpi", type=int, default=200, help="DPI для распознавания штрих-кодов.")
     args = parser.parse_args()
-
     try:
-        template_doc = read_pdf_to_dict(args.template_pdf, args.threads)
+        template_doc = read_pdf_to_dict(args.template_pdf, args.threads, args.batch_size)
         logging.info("Шаблон: %s", template_doc)
-        test_doc = read_pdf_to_dict(args.test_pdf, args.threads)
+        test_doc = read_pdf_to_dict(args.test_pdf, args.threads, args.batch_size)
         logging.info("Тестовые данные: %s", test_doc)
-
         for page_num in template_doc:
             template_page = template_doc.get(page_num, {})
             test_page = test_doc.get(page_num, {})
@@ -202,10 +247,11 @@ def main():
                 logging.error(f"Структура страницы {page_num} не соответствует шаблону")
             else:
                 logging.info(f"Структура страницы {page_num} корректна")
-        barcodes = extract_barcodes(args.test_pdf, args.threads, args.dpi)
+        barcodes = extract_barcodes(args.test_pdf, args.threads, args.dpi, args.batch_size)
         logging.info("Найденные баркоды по страницам: %s", barcodes)
     except Exception as e:
         logging.error(f"Ошибка: {e}", exc_info=True)
 
 if __name__ == "__main__":
+    # cProfile.run('main()')
     main()
