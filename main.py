@@ -1,4 +1,5 @@
 import argparse
+# import cProfile
 import itertools
 import logging
 import os
@@ -8,9 +9,8 @@ from datetime import datetime
 import fitz  # PyMuPDF - pip install pymupdf
 from PIL import Image
 from dateutil.relativedelta import relativedelta
-from pyzbar.pyzbar import decode  # !apt install libzbar0
 # from memory_profiler import profile
-# import cProfile
+from pyzbar.pyzbar import decode  # !apt install libzbar0
 
 logging.basicConfig(
     level=logging.INFO,
@@ -38,6 +38,24 @@ def open_pdf(pdf_path):
         logging.error(f"Неизвестная ошибка при открытии файла {pdf_path}: {str(e)}")
         raise
 
+def read_pdf_to_dict(pdf_path, num_threads, batch_size):
+    doc = open_pdf(pdf_path)
+    with ThreadPoolExecutor(max_workers=num_threads) as executor:
+        pages_text = batch_process(executor, get_page_text, doc, batch_size=batch_size)
+        page_generator = (
+            (f"Page_{page_num}", parse_data_text(text))
+            for page_num, text in enumerate(pages_text, 1)
+        )
+        page_dict = dict(page_generator)
+    return page_dict
+
+def batch_process(executor, func, items, batch_size):
+    items_iter = iter(items)
+    batches = iter(lambda: list(itertools.islice(items_iter, batch_size)), [])
+    return itertools.chain.from_iterable(
+        executor.map(func, batch) for batch in batches
+    )
+
 def get_page_text(page):
     try:
         return page.get_text("text").strip()
@@ -56,54 +74,6 @@ def parse_data_text(text):
         elif current_key:
             data_dict[current_key] += ' ' + line.strip()
     return data_dict
-
-def preprocess_image(pix):
-    if not (hasattr(pix, "width") and hasattr(pix, "height")):
-        raise AttributeError("Объект pix должен содержать атрибуты width и height")
-
-    if pix.width <= 0 or pix.height <= 0:
-        raise ValueError(f"Некорректные размеры изображения: {pix.width}x{pix.height}")
-
-    mode = "RGBA" if pix.n >= 4 else ("RGB" if pix.colorspace else "L")
-    image = Image.frombytes(mode, (pix.width, pix.height), pix.samples)
-
-    if pix.n >= 4:
-        image = image.convert("RGB")
-
-    return image
-
-def batch_process(executor, func, items, batch_size=10):
-    items_iter = iter(items)
-    batches = iter(lambda: list(itertools.islice(items_iter, batch_size)), [])
-    return itertools.chain.from_iterable(
-        executor.map(func, batch) for batch in batches
-    )
-
-def read_pdf_to_dict(pdf_path, num_threads, batch_size):
-    doc = open_pdf(pdf_path)
-    with ThreadPoolExecutor(max_workers=num_threads) as executor:
-        pages_text = batch_process(executor, get_page_text, doc, batch_size=batch_size)
-        page_generator = (
-            (f"Page_{page_num}", parse_data_text(text))
-            for page_num, text in enumerate(pages_text, 1)
-        )
-        page_dict = dict(page_generator)
-    return page_dict
-
-def validate_date(date_str):
-    formats = (
-        "%d.%m.%Y",
-        "%d/%m/%Y",
-        "%d-%m-%Y",
-        "%d %m %Y"
-    )
-    for fmt in formats:
-        try:
-            date = datetime.strptime(date_str, fmt)
-            return date <= datetime.now() + relativedelta(years=10)
-        except ValueError:
-            continue
-    return False
 
 def validate_structure(template_data, test_data):
     template_keys = set(template_data.keys())
@@ -200,18 +170,20 @@ def validate_structure(template_data, test_data):
             return False
     return True
 
-def process_page_for_barcodes(page, dpi):
-    if dpi < 150 or dpi > 600:
-        logging.error(f"Ошибка: Значение DPI {dpi} для страницы {page.number + 1} вне допустимого диапазона (150-600).")
-        return []
-    try:
-        pix = page.get_pixmap(dpi=dpi)
-        img = preprocess_image(pix)
-        decoded_objects = decode(img)
-        return [obj.data.decode('utf-8', errors='ignore') for obj in decoded_objects]
-    except Exception as e:
-        logging.error(f"Ошибка при обработке страницы {page.number + 1}: {e}", exc_info=True)
-        return []
+def validate_date(date_str):
+    formats = (
+        "%d.%m.%Y",
+        "%d/%m/%Y",
+        "%d-%m-%Y",
+        "%d %m %Y"
+    )
+    for fmt in formats:
+        try:
+            date = datetime.strptime(date_str, fmt)
+            return date <= datetime.now() + relativedelta(years=10)
+        except ValueError:
+            continue
+    return False
 
 def extract_barcodes(pdf_path, num_threads, dpi, batch_size):
     doc = open_pdf(pdf_path)
@@ -226,14 +198,68 @@ def extract_barcodes(pdf_path, num_threads, dpi, batch_size):
             f"Page_{page_num}": barcodes
             for page_num, barcodes in enumerate(page_barcodes, start=1)
         }
+
+def process_page_for_barcodes(page, dpi):
+    if dpi < 150 or dpi > 600:
+        logging.error(f"Ошибка: Значение DPI {dpi} для страницы {page.number + 1} вне допустимого диапазона (150-600).")
+        return []
+    try:
+        pix = page.get_pixmap(dpi=dpi)
+        img = preprocess_image(pix)
+        decoded_objects = decode(img)
+        return [obj.data.decode('utf-8', errors='ignore') for obj in decoded_objects]
+    except Exception as e:
+        logging.error(f"Ошибка при обработке страницы {page.number + 1}: {e}", exc_info=True)
+        return []
+
+def preprocess_image(pix):
+    if not (hasattr(pix, "width") and hasattr(pix, "height")):
+        raise AttributeError("Объект pix должен содержать атрибуты width и height")
+    if pix.width <= 0 or pix.height <= 0:
+        raise ValueError(f"Некорректные размеры изображения: {pix.width}x{pix.height}")
+    mode = "RGBA" if pix.n >= 4 else ("RGB" if pix.colorspace else "L")
+    image = Image.frombytes(mode, (pix.width, pix.height), pix.samples)
+    if pix.n >= 4:
+        image = image.convert("RGB")
+    return image
+
 # @profile
 def main():
-    parser = argparse.ArgumentParser(description="Обработка PDF-файлов и проверка их по шаблону.")
-    parser.add_argument("template_pdf", nargs='?', default="test_task.pdf", help="Путь к PDF-файлу с шаблоном.")
-    parser.add_argument("test_pdf", nargs='?', default="test_task.pdf", help="Путь к PDF-файлу для проверки.")
-    parser.add_argument("--threads", type=int, default=min(8, os.cpu_count() or 2), help="Максимальное количество потоков.")
-    parser.add_argument("--batch-size", type=int, default=10, help="Размер пакета для обработки.")
-    parser.add_argument("--dpi", type=int, default=200, help="DPI для распознавания штрих-кодов.")
+    parser = argparse.ArgumentParser(
+        description="Программа проверяет PDF-файл на соответствие структуре шаблона и распознаёт штрих-коды.",
+        epilog="Пример использования: python script.py template.pdf test.pdf --threads 4 --batch-size=15 --dpi 300",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    parser.add_argument(
+        "template_pdf",
+        nargs='?',
+        default="test_task.pdf",
+        help="Путь к PDF-файлу с шаблоном (по умолчанию: test_task.pdf)"
+    )
+    parser.add_argument(
+        "test_pdf",
+        nargs='?',
+        default="test_task.pdf",
+        help="Путь к PDF-файлу для проверки (по умолчанию: test_task.pdf)"
+    )
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=min(8, os.cpu_count() or 2),
+        help="Максимальное количество потоков (по умолчанию: min(8, количество CPU ядер или 2))"
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=10,
+        help="Размер пакета для обработки страниц (по умолчанию: 10)"
+    )
+    parser.add_argument(
+        "--dpi",
+        type=int,
+        default=200,
+        help="DPI для распознавания штрих-кодов (по умолчанию: 200)"
+    )
     args = parser.parse_args()
     try:
         template_doc = read_pdf_to_dict(args.template_pdf, args.threads, args.batch_size)
