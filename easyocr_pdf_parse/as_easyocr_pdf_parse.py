@@ -99,7 +99,7 @@ async def process_page(doc, page_num, reader, semaphore, temp_dir, dpi=150):
         gc.collect()
 
 async def extract_text_from_pdf(pdf_path, languages=['en'], max_concurrent=2, dpi=150):
-        """
+    """
     Асинхронно извлекает текст из PDF-документа с помощью OCR (EasyOCR).
     
     Args:
