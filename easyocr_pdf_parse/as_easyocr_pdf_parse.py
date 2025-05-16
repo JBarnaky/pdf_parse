@@ -68,14 +68,22 @@ async def process_page(doc, page_num, reader, semaphore, temp_dir, dpi=150):
         # Сохранение изображения в памяти во временный файл
         with open(image_path, "wb") as f:
             f.write(image_bytes)
-        del image_bytes  # Удаляем данные изображения сразу после записи
         logger.info(f"Изображение страницы {page_num + 1} сохранено во временный файл")
 
+        if not os.path.exists(image_path):
+            logger.error(f"Файл {image_path} не найден после записи")
+            return page_num + 1, ""
+        
         # Выполнение OCR
         logger.info(f"Начало OCR для страницы {page_num + 1}")
-        ocr_result = await asyncio.to_thread(reader.readtext, image_path, detail=0)
-        logger.info(f"OCR завершён для страницы {page_num + 1}")
-        return page_num + 1, " ".join(ocr_result)
+        
+        try:
+            ocr_result = await asyncio.to_thread(reader.readtext, image_path, detail=0)
+            logger.info(f"OCR завершён для страницы {page_num + 1}")
+            return page_num + 1, " ".join(ocr_result)
+        except Exception as e:
+            logger.error(f"OCR ошибка для страницы {page_num + 1}: {e}")
+            return page_num + 1, ""
     except Exception as e:
         logger.error(f"Ошибка обработки страницы {page_num + 1}: {e}")
         return page_num + 1, ""
@@ -87,7 +95,7 @@ async def process_page(doc, page_num, reader, semaphore, temp_dir, dpi=150):
                 logger.debug(f"Временный файл {image_path} удалён")
             except Exception as e:
                 logger.error(f"Ошибка удаления временного файла {image_path}: {e}")
-        
+
         gc.collect()
 
 async def extract_text_from_pdf(pdf_path, languages=['en'], max_concurrent=2, dpi=150):
