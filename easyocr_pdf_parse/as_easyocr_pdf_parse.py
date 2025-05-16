@@ -7,17 +7,16 @@ import logging
 import tempfile
 from typing import List, Dict, Optional
 from pathlib import Path
+import gc
 
 import fitz  # PyMuPDF
 import easyocr
-
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-
-def load_page_to_image(doc: fitz.Document, page_num: int, dpi: int = 200) -> bytes:
+def load_page_to_image(doc, page_num, dpi=150):
     """
     Синхронно извлекает страницу PDF и возвращает изображение в формате PNG в виде байтов.
     
@@ -32,20 +31,14 @@ def load_page_to_image(doc: fitz.Document, page_num: int, dpi: int = 200) -> byt
     try:
         page = doc.load_page(page_num)
         pix = page.get_pixmap(dpi=dpi)
-        return pix.tobytes("png")
+        image_bytes = pix.tobytes("png")
+        pix = None  # Освобождаем ресурсы, связанные с pixmap
+        return image_bytes
     except Exception as e:
         logger.error(f"Ошибка извлечения изображения страницы {page_num + 1}: {e}")
         return b""
 
-
-async def process_page(
-    doc: fitz.Document,
-    page_num: int,
-    reader: easyocr.Reader,
-    semaphore: asyncio.Semaphore,
-    temp_dir: str,
-    dpi: int = 200
-) -> (int, str):
+async def process_page(doc, page_num, reader, semaphore, temp_dir, dpi=150):
     """
     Асинхронно обрабатывает одну страницу PDF-документа.
     
@@ -61,22 +54,23 @@ async def process_page(
         Кортеж (номер страницы, извлечённый текст).
     """
     logger.info(f"Начало обработки страницы {page_num + 1}")
-    
+
     image_bytes = await asyncio.to_thread(load_page_to_image, doc, page_num, dpi)
     if not image_bytes:
         logger.warning(f"Не удалось получить изображение для страницы {page_num + 1}")
         return page_num + 1, ""
 
     logger.info(f"Страница {page_num + 1} конвертирована в изображение")
-    
+
     image_path = os.path.join(temp_dir, f"page_{page_num + 1}_{uuid.uuid4().hex}.png")
-    
+
     try:
         # Сохранение изображения в памяти во временный файл
         with open(image_path, "wb") as f:
             f.write(image_bytes)
+        del image_bytes  # Удаляем данные изображения сразу после записи
         logger.info(f"Изображение страницы {page_num + 1} сохранено во временный файл")
-        
+
         # Выполнение OCR
         logger.info(f"Начало OCR для страницы {page_num + 1}")
         ocr_result = await asyncio.to_thread(reader.readtext, image_path, detail=0)
@@ -87,16 +81,18 @@ async def process_page(
         return page_num + 1, ""
     finally:
         # Автоматическое удаление временного файла благодаря контекстному менеджеру
-        pass  # Удаление происходит при удалении временной директории
+        if os.path.exists(image_path):
+            try:
+                os.remove(image_path)
+                logger.debug(f"Временный файл {image_path} удалён")
+            except Exception as e:
+                logger.error(f"Ошибка удаления временного файла {image_path}: {e}")
+        
+        del image_bytes
+        gc.collect()
 
-
-async def extract_text_from_pdf(
-    pdf_path: str, 
-    languages: List[str] = ['en'], 
-    max_concurrent: int = 4,
-    dpi: int = 200
-) -> Optional[Dict[int, str]]:
-    """
+async def extract_text_from_pdf(pdf_path, languages=['en'], max_concurrent=2, dpi=150):
+        """
     Асинхронно извлекает текст из PDF-документа с помощью OCR (EasyOCR).
     
     Args:
@@ -116,37 +112,37 @@ async def extract_text_from_pdf(
         logger.info(f"Начало обработки PDF-файла: {pdf_path}")
         # Инициализация OCR Reader
         logger.info(f"Инициализация EasyOCR Reader с языками: {languages}")
-        reader = await asyncio.to_thread(easyocr.Reader, languages)
-        
+        reader = await asyncio.to_thread(easyocr.Reader, languages, gpu=True)
+
         # Открытие PDF документа
         logger.info(f"Открытие PDF-документа: {pdf_path}")
         doc = await asyncio.to_thread(fitz.open, pdf_path)
         logger.info(f"Документ содержит {len(doc)} страниц")
-        
+
         # Создание временной директории для изображений
         with tempfile.TemporaryDirectory() as temp_dir:
             logger.info(f"Создана временная директория для изображений: {temp_dir}")
-            
+
             # Ограничение параллелизма
             semaphore = asyncio.Semaphore(max_concurrent)
-            
+
             # Создание задач для обработки страниц
             logger.info(f"Создание задач для обработки {len(doc)} страниц")
             tasks = [
                 process_page(doc, page_num, reader, semaphore, temp_dir, dpi)
                 for page_num in range(len(doc))
             ]
-            
+
             # Выполнение задач
             logger.info("Начало параллельной обработки страниц")
             results = await asyncio.gather(*tasks)
             logger.info("Завершена обработка всех страниц")
-            
+
             # Формирование результата
             text_data = {page_num: text for page_num, text in results}
             logger.info(f"Извлечено {sum(1 for text in text_data.values() if text)} страниц с текстом")
             return text_data
-            
+
     except Exception as e:
         logger.error(f"Ошибка при обработке PDF: {e}")
         return None
@@ -156,11 +152,13 @@ async def extract_text_from_pdf(
             if 'doc' in locals():
                 await asyncio.to_thread(doc.close)
             logger.info("Документ успешно закрыт")
+            if 'reader' in locals():
+                del reader
+            gc.collect()
         except Exception as e:
             logger.error(f"Ошибка при закрытии документа: {e}")
 
-
-async def save_to_json(data: Dict[int, str], output_path: str) -> None:
+async def save_to_json(data, output_path):
     """
     Асинхронно сохраняет данные в JSON-файл.
     """
@@ -173,22 +171,21 @@ async def save_to_json(data: Dict[int, str], output_path: str) -> None:
         def write_file():
             with open(output_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=4)
-        
+
         await asyncio.to_thread(write_file)
         logger.info(f"Результат сохранён в '{output_path}'.")
     except Exception as e:
         logger.error(f"Ошибка при сохранении JSON: {e}")
 
-
 async def main():
     """Основная функция для запуска обработки PDF."""
     pdf_file = "da8b0f0b-cfea-40c4-b020-e0924a142f4b.pdf"
     output_file = "extracted_text.json"
-    
+
     # Извлечение текста
     logger.info("Начало основной функции обработки")
-    text_data = await extract_text_from_pdf(pdf_file, languages=["en"], max_concurrent=4, dpi=200)
-    
+    text_data = await extract_text_from_pdf(pdf_file, languages=["en"], max_concurrent=2, dpi=150)
+
     # Сохранение результата
     if text_data:
         logger.info("Начало сохранения извлечённых данных")
@@ -196,7 +193,6 @@ async def main():
         logger.info("Обработка завершена успешно")
     else:
         logger.warning("Не удалось извлечь текст из PDF-файла")
-
 
 if __name__ == "__main__":
     nest_asyncio.apply()
