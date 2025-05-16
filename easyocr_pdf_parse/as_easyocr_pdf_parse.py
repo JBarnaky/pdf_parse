@@ -88,7 +88,6 @@ async def process_page(doc, page_num, reader, semaphore, temp_dir, dpi=150):
             except Exception as e:
                 logger.error(f"Ошибка удаления временного файла {image_path}: {e}")
         
-        del image_bytes
         gc.collect()
 
 async def extract_text_from_pdf(pdf_path, languages=['en'], max_concurrent=2, dpi=150):
